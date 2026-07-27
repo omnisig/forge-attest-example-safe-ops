@@ -1,0 +1,12 @@
+[profile.default]
+src = "src"
+script = "script"
+out = "forge-out"          # compiler artifacts (kept separate from the emitted tx JSON)
+libs = ["lib"]
+solc = "0.8.28"            # pinned for hygiene; note: the emitted JSON bytes do not depend on solc
+optimizer = true
+optimizer_runs = 200
+via_ir = true              # avoids stack-too-deep in the JSON assembly; no effect on output bytes
+
+# The producer script writes the Safe-tx JSON here. Nothing else may be written.
+fs_permissions = [{ access = "read-write", path = "./out" }]
