@@ -22,14 +22,29 @@ interface Vm {
 }
 
 /// @title Propose
-/// @notice OPTIONAL companion to `BuildSafeTx`. Reads the already-built
-///         `out/safe-tx.json`, recomputes the EIP-712 Safe transaction hash,
-///         signs it with a proposer key, and writes `out/proposal.json` — the
-///         exact body to POST to the Safe Transaction Service. The HTTP POST
-///         itself is done by `propose.sh` (Foundry can't cleanly POST).
+/// @notice OPTIONAL companion to the producers. Reads a **canonical SafeTx JSON**,
+///         recomputes the EIP-712 Safe transaction hash, signs it with a proposer
+///         key, and writes `out/proposal.json` — the exact body to POST to the
+///         Safe Transaction Service. The HTTP POST itself is done by `propose.sh`
+///         (Foundry can't cleanly POST).
 ///
 ///         Requires:  PROPOSER_PK  (env, hex private key of a Safe owner/delegate)
+///         Optional:  SAFE_TX_JSON (env, path relative to the project root;
+///                                  default `out/safe-tx.json`)
 ///         Run with:  forge script script/Propose.s.sol:Propose
+///
+///         `BuildSafeTx` writes a canonical SafeTx directly. `BuildSafeBatch`
+///         writes a Transaction Builder batch, which is not yet a transaction —
+///         fold it into a canonical SafeTx first, binding it to a Safe and nonce:
+///
+///           forge-attest/lib/normalize.sh --input out/safe-batch.json \
+///             --safe 0x<safe> --nonce <n> > out/canonical-safe-tx.json
+///           SAFE_TX_JSON=out/canonical-safe-tx.json forge script script/Propose.s.sol:Propose
+///
+///         Folding lives in `forge-attest` rather than being reimplemented here on
+///         purpose: the MultiSend packing that decides what owners sign should have
+///         exactly one implementation on the producing side, and it should be the
+///         one the verifier independently re-derives.
 ///
 ///         This step needs a real Safe + a real proposer key + network to be
 ///         useful; it is NOT part of the attestation/CI path.
@@ -59,7 +74,8 @@ contract Propose {
     }
 
     function run() external {
-        string memory json = vm.readFile(string.concat(vm.projectRoot(), "/out/safe-tx.json"));
+        string memory path = vm.envOr("SAFE_TX_JSON", string("out/safe-tx.json"));
+        string memory json = vm.readFile(string.concat(vm.projectRoot(), "/", path));
 
         SafeTx memory t = SafeTx({
             safe: vm.parseJsonAddress(json, ".safe"),

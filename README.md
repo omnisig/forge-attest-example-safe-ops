@@ -1,36 +1,86 @@
 # forge-attest-example-safe-ops
 
 A **reference "producer" repo** for [`forge-attest`](../forge-attest). It stands in
-for a real operations repo whose Forge script builds a transaction to be submitted
+for a real operations repo whose Forge scripts build transactions to be submitted
 to a Gnosis Safe.
 
-The single script, [`script/BuildSafeTx.s.sol`](script/BuildSafeTx.s.sol),
-deterministically emits the full set of EIP-712 `SafeTx` fields as JSON:
+There are two producers, one per JSON shape `forge-attest` verifies:
+
+| Script | Emits | Format |
+|--------|-------|--------|
+| [`script/BuildSafeTx.s.sol`](script/BuildSafeTx.s.sol) | `out/safe-tx.json` | A complete, flat EIP-712 `SafeTx` — one call, fully specified. |
+| [`script/BuildSafeBatch.s.sol`](script/BuildSafeBatch.s.sol) | `out/safe-batch.json` | A Safe{Wallet} **Transaction Builder batch** — several calls approved as one transaction. |
 
 ```bash
-mkdir -p out
-forge script script/BuildSafeTx.s.sol:BuildSafeTx
-cat out/safe-tx.json
+forge script script/BuildSafeTx.s.sol:BuildSafeTx        && cat out/safe-tx.json
+forge script script/BuildSafeBatch.s.sol:BuildSafeBatch  && cat out/safe-batch.json
 ```
+
+## The two shapes, and why the difference matters
+
+`BuildSafeTx` emits every EIP-712 `SafeTx` field, so its output *is* a
+transaction — hashing it needs nothing else:
+
+```json
+{
+  "safe": "0x…", "chainId": "1", "safeVersion": "1.3.0",
+  "to": "0x…", "value": "0", "data": "0x…", "operation": "0",
+  "safeTxGas": "0", "baseGas": "0", "gasPrice": "0",
+  "gasToken": "0x00…00", "refundReceiver": "0x00…00", "nonce": "42"
+}
+```
+
+`BuildSafeBatch` emits the Transaction Builder format instead — the shape you get
+from the Safe UI's "export batch", and the one FraxFinance's
+[`SafeTxHelper.writeTxs`](https://github.com/FraxFinance/frax-standard-solidity/blob/master/src/SafeTxHelper.sol)
+writes:
+
+```json
+{
+  "version": "1.0",
+  "chainId": 1,
+  "createdAt": 1760128999000,
+  "meta": { "name": "Transactions Batch", "description": "" },
+  "transactions": [
+    { "to": "0x…", "value": "0", "data": "0x…", "operation": "0" },
+    { "to": "0x…", "value": "0", "data": "0x…", "operation": "0" }
+  ]
+}
+```
+
+Note what is *missing*: no Safe address, no nonce, no gas fields. **A batch is not
+yet a transaction.** It becomes one only when it is bound to a specific Safe at a
+specific nonce and folded into a single `multiSend(bytes)` delegatecall — which is
+what the Safe UI does on submission, and what owners actually sign. `forge-attest`
+performs that fold from its own config, so the Safe address and nonce live in the
+attestation claim rather than in this repo.
+
+Note also `createdAt`: `SafeTxHelper` stamps it with `block.timestamp * 1000`, and
+`BuildSafeBatch` copies that behaviour faithfully. Under a fork or a broadcast the
+value moves every run, so a byte-exact `sha256` of a batch file is not something
+you can pin. That is why `forge-attest` also pins a **canonical digest**, computed
+after folding and normalisation, which timestamps and formatting cannot move.
 
 ## Why this is verifiable
 
 - **Zero dependencies** — the cheatcode interface is declared inline, so there is no
   `forge install`, no `lib/`, nothing to drift.
-- **No non-determinism** — every input is a compile-time constant and the JSON is
-  built by plain string concatenation. There is no timestamp, no RNG, no on-chain
-  read. Running the script on any machine, with any solc, yields **byte-identical**
-  output. (The emitted bytes are calldata + fixed fields; they do not depend on the
-  compiler.)
+- **No hidden inputs** — every value is a compile-time constant and the JSON is
+  built by plain string concatenation. There is no RNG and no on-chain read, so the
+  emitted bytes are calldata plus fixed fields and do not depend on the compiler.
 
-Because the output is byte-stable, `forge-attest` can pin its `sha256` at a specific
-commit of this repo and prove that a submitted Safe transaction is exactly what this
-script produces — and was not hand-edited on the way to the Safe UI.
+`BuildSafeTx`'s output is therefore byte-identical on any machine, and
+`forge-attest` can pin its `sha256` directly. `BuildSafeBatch`'s output is
+byte-identical *apart from* `createdAt`, and is pinned via the canonical digest.
+Either way, a submitted Safe transaction can be proven to be exactly what these
+scripts produce — and not something hand-edited on the way to the Safe UI.
 
-The transaction built here is `USDC.transfer(0x…dEaD, 1 USDC)` on Ethereum mainnet,
-Safe `0x111CEEee040739fD91D29C34C33E6B3E112F2177`, nonce `42`.
+The transactions built here are illustrative demo data on Ethereum mainnet against
+Safe `0x111CEEee040739fD91D29C34C33E6B3E112F2177`:
 
-> This is example/demo data. The Safe address and nonce are illustrative.
+- `BuildSafeTx`: `USDC.transfer(0x…dEaD, 1 USDC)`, nonce `42`.
+- `BuildSafeBatch`: `USDC.approve(0x1111…0582, 0)` then `USDC.transfer(0x…dEaD, 1 USDC)`
+  — a revoke and a transfer that must land together or not at all.
 
 ## Optional: proposing to the Safe (separate from attestation)
 
@@ -50,9 +100,30 @@ PROPOSER_PK=0x<owner-or-delegate-key> forge script script/Propose.s.sol:Propose
 ./propose.sh --network ethereum
 ```
 
-- `Propose.s.sol` recomputes the EIP-712 Safe tx hash from `out/safe-tx.json`, signs
-  it, and writes `out/proposal.json` (the exact POST body incl. `contractTransactionHash`).
+- `Propose.s.sol` recomputes the EIP-712 Safe tx hash from a canonical SafeTx JSON,
+  signs it, and writes `out/proposal.json` (the exact POST body incl.
+  `contractTransactionHash`).
 - `propose.sh` submits that payload to the network's Transaction Service.
+
+### Proposing a batch
+
+A batch has to be folded and bound first. Reuse `forge-attest`'s normaliser rather
+than reimplementing MultiSend packing here — the packing that decides what owners
+sign should have one implementation on this side and be independently re-derived by
+the verifier, not two copies that can drift:
+
+```bash
+forge script script/BuildSafeBatch.s.sol:BuildSafeBatch
+
+../forge-attest/lib/normalize.sh --input out/safe-batch.json \
+  --safe 0x111CEEee040739fD91D29C34C33E6B3E112F2177 --nonce 43 \
+  > out/canonical-safe-tx.json
+
+PROPOSER_PK=0x<key> SAFE_TX_JSON=out/canonical-safe-tx.json \
+  forge script script/Propose.s.sol:Propose
+
+./propose.sh --network ethereum --safe-tx out/canonical-safe-tx.json
+```
 
 The proposer key must be a Safe **owner or registered delegate**. This path is **not**
 part of the attestation/CI pipeline — it just demonstrates the real submission step
