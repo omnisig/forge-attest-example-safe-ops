@@ -37,7 +37,7 @@ interface Vm {
 ///         writes a Transaction Builder batch, which is not yet a transaction —
 ///         fold it into a canonical SafeTx first, binding it to a Safe and nonce:
 ///
-///           forge-attest/lib/normalize.sh --input out/safe-batch.json \
+///           ../forge-attest/lib/normalize.sh --input out/safe-batch.json \
 ///             --safe 0x<safe> --nonce <n> > out/canonical-safe-tx.json
 ///           SAFE_TX_JSON=out/canonical-safe-tx.json forge script script/Propose.s.sol:Propose
 ///
